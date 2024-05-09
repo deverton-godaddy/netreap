@@ -35,9 +35,10 @@ func (p *eventStreamerMock) Stream(ctx context.Context, topics map[nomad_api.Top
 }
 
 type endpointUpdaterMock struct {
-	endpointListFn  func() ([]*models.Endpoint, error)
-	endpointGetFn   func(id string) (*models.Endpoint, error)
-	endpointPatchFn func(id string, ep *models.EndpointChangeRequest) error
+	endpointListFn   func() ([]*models.Endpoint, error)
+	endpointGetFn    func(id string) (*models.Endpoint, error)
+	endpointPatchFn  func(id string, ep *models.EndpointChangeRequest) error
+	endpointDeleteFn func(id string) error
 }
 
 func (p *endpointUpdaterMock) EndpointList() ([]*models.Endpoint, error) {
@@ -57,6 +58,13 @@ func (p *endpointUpdaterMock) EndpointGet(id string) (*models.Endpoint, error) {
 func (p *endpointUpdaterMock) EndpointPatch(id string, ep *models.EndpointChangeRequest) error {
 	if p != nil && p.endpointPatchFn != nil {
 		return p.endpointPatchFn(id, ep)
+	}
+	return nil
+}
+
+func (p *endpointUpdaterMock) EndpointDelete(id string) error {
+	if p != nil && p.endpointDeleteFn != nil {
+		return p.endpointDeleteFn(id)
 	}
 	return nil
 }
@@ -104,6 +112,10 @@ func TestEndpointReconcile(t *testing.T) {
 					t.Fatalf("unexpected call to patch endpoint")
 					return nil
 				},
+				endpointDeleteFn: func(id string) error {
+					t.Fatalf("unexpected call to delete endpoint")
+					return nil
+				},
 			},
 			&allocationInfoMock{
 				infoFn: func(allocID string, q *nomad_api.QueryOptions) (*nomad_api.Allocation, *nomad_api.QueryMeta, error) {
@@ -137,6 +149,10 @@ func TestEndpointReconcile(t *testing.T) {
 
 					return nil
 				},
+				endpointDeleteFn: func(id string) error {
+					t.Fatalf("unexpected call to delete endpoint")
+					return nil
+				},
 			},
 			&allocationInfoMock{
 				infoFn: func(allocID string, q *nomad_api.QueryOptions) (*nomad_api.Allocation, *nomad_api.QueryMeta, error) {
@@ -145,6 +161,49 @@ func TestEndpointReconcile(t *testing.T) {
 						t.Errorf("wrong container ID passed, expected %v, got %v", expectedContainerID, allocID)
 					}
 					return allocationOne, nil, nil
+				},
+			},
+			false,
+		},
+		{
+			"No matching endpoint",
+			&endpointUpdaterMock{
+				endpointListFn: func() ([]*models.Endpoint, error) {
+					return []*models.Endpoint{endpointOne}, nil
+				},
+				endpointPatchFn: func(endpointID string, ep *models.EndpointChangeRequest) error {
+					expectedID := endpoint_id.NewCiliumID(endpointOne.ID)
+					expectedContainerID := endpointOne.Status.ExternalIdentifiers.ContainerID
+
+					if endpointID != expectedID {
+						t.Errorf("wrong endpoint ID passed, expected %v, got %v", expectedID, endpointID)
+					}
+
+					if ep.ContainerID != expectedContainerID {
+						t.Errorf("wrong container ID passed, expected %v, got %v", expectedContainerID, ep.ContainerID)
+					}
+
+					if !reflect.DeepEqual(ep.Labels, endpointOneLabels) {
+						t.Errorf("wrong labels, expected %v, got %v", endpointOneLabels, ep.Labels)
+					}
+
+					return nil
+				},
+				endpointDeleteFn: func(endpointID string) error {
+					expectedID := endpoint_id.NewCiliumID(endpointOne.ID)
+					if endpointID != expectedID {
+						t.Errorf("wrong endpoint ID passed, expected %v, got %v", expectedID, endpointID)
+					}
+					return nil
+				},
+			},
+			&allocationInfoMock{
+				infoFn: func(allocID string, q *nomad_api.QueryOptions) (*nomad_api.Allocation, *nomad_api.QueryMeta, error) {
+					expectedContainerID := endpointOne.Status.ExternalIdentifiers.ContainerID
+					if allocID != expectedContainerID {
+						t.Errorf("wrong container ID passed, expected %v, got %v", expectedContainerID, allocID)
+					}
+					return nil, nil, nil
 				},
 			},
 			false,
@@ -178,6 +237,10 @@ func TestEndpointRunErrorHandling(t *testing.T) {
 		},
 		endpointPatchFn: func(id string, ep *models.EndpointChangeRequest) error {
 			t.Fatalf("unexpected call to patch endpoint")
+			return nil
+		},
+		endpointDeleteFn: func(id string) error {
+			t.Fatalf("unexpected call to delete endpoint")
 			return nil
 		},
 	}

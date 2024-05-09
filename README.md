@@ -236,6 +236,7 @@ clients are available to Netreap.
 
 | Flag                   | Env Var               | Default                       | Description                                                                                                   |
 | ---------------------- | --------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `--cluster-name`       | `NETREAP_CLUSTER_NAME`    |                       | Cilium cluster to manage, e.g. `default` |
 | `--debug`              | `NETREAP_DEBUG`           | `false`               | Turns on debug logging                                                                                        |
 | `--policies-prefix`    | `NETREAP_POLICIES_PREFIX` | `netreap/policies/v1` | kvstore prefix that Netreap watches for changes to the Cilium policies JSON value |
 | `--kvstore`            | `NETREAP_KVSTORE`         |                       | Key-value store type, same expected values as Cilium |

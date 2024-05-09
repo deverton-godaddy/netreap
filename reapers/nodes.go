@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"path"
 	"time"
 
 	"github.com/cilium/cilium/pkg/kvstore"
+	"github.com/cilium/cilium/pkg/node/store"
 	"github.com/cilium/cilium/pkg/node/types"
 	nomad_api "github.com/hashicorp/nomad/api"
 	"go.uber.org/zap"
@@ -15,25 +17,25 @@ import (
 	"github.com/cosmonic-labs/netreap/elector"
 )
 
-const nodePrefix = "cilium/state/nodes/v1/default/"
-
 type NodeReaper struct {
 	allocID          string
 	ctx              context.Context
 	kvStoreClient    kvstore.BackendOperations
 	nomadNodeInfo    NodeInfo
 	nomadEventStream EventStreamer
+	prefix           string
 }
 
 // NewNodeReaper creates a new NodeReaper. This will run an initial reconciliation before returning the
 // reaper
-func NewNodeReaper(ctx context.Context, kvStoreClient kvstore.BackendOperations, nomadNodeInfo NodeInfo, nomadEventStream EventStreamer, allocID string) (*NodeReaper, error) {
+func NewNodeReaper(ctx context.Context, kvStoreClient kvstore.BackendOperations, nomadNodeInfo NodeInfo, nomadEventStream EventStreamer, allocID string, clusterName string) (*NodeReaper, error) {
 	reaper := NodeReaper{
 		allocID:          allocID,
 		ctx:              ctx,
 		kvStoreClient:    kvStoreClient,
 		nomadNodeInfo:    nomadNodeInfo,
 		nomadEventStream: nomadEventStream,
+		prefix:           path.Join(store.NodeStorePrefix, clusterName),
 	}
 
 	// Do the initial reconciliation loop
@@ -121,7 +123,7 @@ func (n *NodeReaper) Run() (<-chan bool, error) {
 						continue
 					}
 
-					err := n.kvStoreClient.Delete(n.ctx, nodePrefix+node.Name)
+					err := n.kvStoreClient.Delete(n.ctx, path.Join(n.prefix, node.Name))
 					if err != nil {
 						zap.L().Error("Unable to delete node from kvstore. Will retry on next reconciliation", zap.String("node-name", node.Name), zap.Error(err))
 					}
@@ -149,7 +151,7 @@ func (n *NodeReaper) reconcile() error {
 	zap.L().Debug("Finished constructing list of all nodes", zap.Any("nodes", nodeMap))
 
 	zap.L().Debug("Fetching cilium nodes from kvstore")
-	rawNodes, err := n.kvStoreClient.ListPrefix(n.ctx, nodePrefix)
+	rawNodes, err := n.kvStoreClient.ListPrefix(n.ctx, n.prefix)
 	if err != nil {
 		return fmt.Errorf("unable to list current cilium nodes: %s", err)
 	}

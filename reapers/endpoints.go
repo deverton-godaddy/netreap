@@ -129,16 +129,18 @@ func (e *EndpointReaper) reconcile() error {
 
 		// Nomad calls the CNI plugin with the allocation ID as the container ID
 		allocation, _, err := e.nomadAllocations.Info(containerID, &nomad_api.QueryOptions{Namespace: "*"})
-		if allocation == nil || err != nil {
-			zap.L().Warn("Couldn't fetch allocation from Nomad",
+		if err != nil {
+			return err
+		}
+		if allocation == nil {
+			zap.L().Warn("Allocation not found in Nomad, removing endpoint",
 				zap.String("container-id", containerID),
 				zap.Int64("endpoint-id", endpoint.ID),
-				zap.Error(err),
 			)
-			continue
+			e.cilium.EndpointDelete(endpoint_id.NewCiliumID(endpoint.ID))
+		} else {
+			e.labelEndpoint(endpoint, allocation)
 		}
-
-		e.labelEndpoint(endpoint, allocation)
 	}
 
 	zap.L().Debug("Finished reconciliation")

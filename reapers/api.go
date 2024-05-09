@@ -27,10 +27,15 @@ type EndpointPatcher interface {
 	EndpointPatch(id string, ep *models.EndpointChangeRequest) error
 }
 
+type EndpointDeleter interface {
+	EndpointDelete(id string) error
+}
+
 type EndpointUpdater interface {
 	EndpointLister
 	EndpointGetter
 	EndpointPatcher
+	EndpointDeleter
 }
 
 type NodeInfo interface {

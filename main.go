@@ -64,7 +64,6 @@ func main() {
 				EnvVars: []string{"NETREAP_KVSTORE_OPTS"},
 			},
 			&cli.StringFlag{
-				Value:       "default",
 				Name:        "cluster-name",
 				Usage:       "Cilium cluster name.",
 				EnvVars:     []string{"NETREAP_CLUSTER_NAME"},
@@ -120,7 +119,7 @@ func run(ctx context.Context, conf config) error {
 
 	logger, err := configureLogging(conf.debug)
 	if err != nil {
-		return fmt.Errorf("can't initialize zap logger: %v", err)
+		return fmt.Errorf("can't initialize zap logger: %w", err)
 	}
 	defer logger.Sync()
 
@@ -129,7 +128,7 @@ func run(ctx context.Context, conf config) error {
 	// Looks for the default Cilium socket path or uses the value from CILIUM_SOCK
 	cilium_client, err := cilium_client.NewDefaultClient()
 	if err != nil {
-		return fmt.Errorf("error when connecting to cilium agent: %s", err)
+		return fmt.Errorf("error when connecting to cilium agent: %w", err)
 	}
 
 	// Fetch config from Cilium if not set
@@ -159,20 +158,20 @@ func run(ctx context.Context, conf config) error {
 
 	err = cilium_kvstore.Setup(ctx, conf.kvStore, conf.kvStoreOpts, nil)
 	if err != nil {
-		return fmt.Errorf("unable to connect to Cilium kvstore: %s", err)
+		return fmt.Errorf("unable to connect to Cilium kvstore: %w", err)
 	}
 
 	// DefaultConfig fetches configuration data from well-known nomad variables (e.g. NOMAD_ADDR,
 	// NOMAD_CACERT), so we'll just leverage that for now.
 	nomad_client, err := nomad_api.NewClient(nomad_api.DefaultConfig())
 	if err != nil {
-		return fmt.Errorf("unable to connect to Nomad: %s", err)
+		return fmt.Errorf("unable to connect to Nomad: %w", err)
 	}
 
 	// Get the node ID of the instance we're running on
 	self, err := nomad_client.Agent().Self()
 	if err != nil {
-		return fmt.Errorf("unable to query local agent info: %s", err)
+		return fmt.Errorf("unable to query local agent info: %w", err)
 	}
 
 	clientStats, ok := self.Stats["client"]
@@ -193,14 +192,14 @@ func run(ctx context.Context, conf config) error {
 	signal.Notify(c, os.Interrupt)
 
 	zap.L().Debug("Starting node reaper")
-	node_reaper, err := reapers.NewNodeReaper(ctx, cilium_kvstore.Client(), nomad_client.Nodes(), nomad_client.EventStream(), os.Getenv("NOMAD_ALLOC_ID"))
+	node_reaper, err := reapers.NewNodeReaper(ctx, cilium_kvstore.Client(), nomad_client.Nodes(), nomad_client.EventStream(), os.Getenv("NOMAD_ALLOC_ID"), conf.clusterName)
 	if err != nil {
 		return err
 	}
 
 	nodeFailChan, err := node_reaper.Run()
 	if err != nil {
-		return fmt.Errorf("unable to start node reaper: %s", err)
+		return err
 	}
 
 	// Step 2: Start the reapers
@@ -209,14 +208,22 @@ func run(ctx context.Context, conf config) error {
 	if err != nil {
 		return err
 	}
+
 	endpointFailChan, err := endpoint_reaper.Run(ctx)
+	if err != nil {
+		return err
+	}
 
 	zap.S().Debug("Starting policies reaper")
 	policies_reaper, err := reapers.NewPoliciesReaper(cilium_kvstore.Client(), conf.policiesPrefix, cilium_client)
 	if err != nil {
 		return err
 	}
+
 	policiesFailChan, err := policies_reaper.Run(ctx)
+	if err != nil {
+		return fmt.Errorf("unable to start policies reaper: %s", err)
+	}
 
 	// Wait for interrupt or client failure
 	select {

@@ -199,7 +199,7 @@ func run(ctx context.Context, conf config) error {
 
 	nodeFailChan, err := node_reaper.Run()
 	if err != nil {
-		return err
+		return fmt.Errorf("unable to start node reaper: %w", err)
 	}
 
 	// Step 2: Start the reapers
@@ -211,7 +211,7 @@ func run(ctx context.Context, conf config) error {
 
 	endpointFailChan, err := endpoint_reaper.Run(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("unable to start endpoint reaper: %w", err)
 	}
 
 	zap.S().Debug("Starting policies reaper")
@@ -222,7 +222,7 @@ func run(ctx context.Context, conf config) error {
 
 	policiesFailChan, err := policies_reaper.Run(ctx)
 	if err != nil {
-		return fmt.Errorf("unable to start policies reaper: %s", err)
+		return fmt.Errorf("unable to start policies reaper: %w", err)
 	}
 
 	// Wait for interrupt or client failure

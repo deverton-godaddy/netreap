@@ -22,6 +22,7 @@ import (
 var Version = "unreleased"
 
 type config struct {
+	clusterName    string
 	debug          bool
 	kvStore        string
 	kvStoreOpts    map[string]string
@@ -61,6 +62,13 @@ func main() {
 				Name:    "kvstore-opts",
 				Usage:   "Consul key to watch for Cilium policy updates.",
 				EnvVars: []string{"NETREAP_KVSTORE_OPTS"},
+			},
+			&cli.StringFlag{
+				Value:       "default",
+				Name:        "cluster-name",
+				Usage:       "Cilium cluster name.",
+				EnvVars:     []string{"NETREAP_CLUSTER_NAME"},
+				Destination: &conf.clusterName,
 			},
 		},
 		Before: func(ctx *cli.Context) error {
@@ -124,27 +132,29 @@ func run(ctx context.Context, conf config) error {
 		return fmt.Errorf("error when connecting to cilium agent: %s", err)
 	}
 
-	// Fetch kvstore config from Cilium if not set
-	if conf.kvStore == "" || len(conf.kvStoreOpts) == 0 {
-		resp, err := cilium_client.ConfigGet()
-		if err != nil {
-			return fmt.Errorf("unable to retrieve cilium configuration: %s", err)
-		}
-		if resp.Status == nil {
-			return fmt.Errorf("unable to retrieve cilium configuration: empty response")
-		}
+	// Fetch config from Cilium if not set
+	resp, err := cilium_client.ConfigGet()
+	if err != nil {
+		return fmt.Errorf("unable to retrieve cilium configuration: %w", err)
+	}
+	if resp.Status == nil {
+		return fmt.Errorf("unable to retrieve cilium configuration: empty response")
+	}
 
-		cfgStatus := resp.Status
+	kvstoreConfig := resp.Status.KvstoreConfiguration
 
-		if conf.kvStore == "" {
-			conf.kvStore = cfgStatus.KvstoreConfiguration.Type
-		}
+	if conf.kvStore == "" {
+		conf.kvStore = kvstoreConfig.Type
+	}
 
-		if len(conf.kvStoreOpts) == 0 {
-			for k, v := range cfgStatus.KvstoreConfiguration.Options {
-				conf.kvStoreOpts[k] = v
-			}
+	if len(conf.kvStoreOpts) == 0 {
+		for k, v := range kvstoreConfig.Options {
+			conf.kvStoreOpts[k] = v
 		}
+	}
+
+	if conf.clusterName == "" {
+		conf.clusterName = resp.Status.DaemonConfigurationMap["ClusterName"].(string)
 	}
 
 	err = cilium_kvstore.Setup(ctx, conf.kvStore, conf.kvStoreOpts, nil)

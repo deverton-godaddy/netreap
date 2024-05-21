@@ -8,6 +8,7 @@ import (
 
 	"github.com/cosmonic-labs/netreap/internal/netreap"
 
+	"github.com/cilium/cilium/pkg/fqdn/re"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/policy/api"
@@ -27,6 +28,13 @@ type PoliciesReaper struct {
 	cilium        PolicyUpdater
 	kvStoreClient kvstore.BackendOperations
 	prefix        string
+}
+
+func init() {
+	// Initialize LRU here because the policy processing
+	// will call down to sanitizing the FQDN rules which contains regexes.
+	// Regexes need to be compiled as part of the FQDN rule validation.
+	re.InitRegexCompileLRU(1000)
 }
 
 func NewPoliciesReaper(kvStoreClient kvstore.BackendOperations, prefix string, cilium PolicyUpdater) (*PoliciesReaper, error) {

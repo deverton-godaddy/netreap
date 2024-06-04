@@ -13,8 +13,6 @@ import (
 	"github.com/cilium/cilium/pkg/node/types"
 	nomad_api "github.com/hashicorp/nomad/api"
 	"go.uber.org/zap"
-
-	"github.com/cosmonic-labs/netreap/elector"
 )
 
 type NodeReaper struct {
@@ -26,8 +24,7 @@ type NodeReaper struct {
 	prefix           string
 }
 
-// NewNodeReaper creates a new NodeReaper. This will run an initial reconciliation before returning the
-// reaper
+// NewNodeReaper creates a new NodeReaper
 func NewNodeReaper(ctx context.Context, kvStoreClient kvstore.BackendOperations, nomadNodeInfo NodeInfo, nomadEventStream EventStreamer, allocID string, clusterName string) (*NodeReaper, error) {
 	reaper := NodeReaper{
 		allocID:          allocID,
@@ -38,11 +35,6 @@ func NewNodeReaper(ctx context.Context, kvStoreClient kvstore.BackendOperations,
 		prefix:           path.Join(store.NodeStorePrefix, clusterName),
 	}
 
-	// Do the initial reconciliation loop
-	if err := reaper.reconcile(); err != nil {
-		return nil, fmt.Errorf("unable to perform initial reconciliation: %s", err)
-	}
-
 	return &reaper, nil
 }
 
@@ -50,6 +42,10 @@ func NewNodeReaper(ctx context.Context, kvStoreClient kvstore.BackendOperations,
 // blocking and will only return errors if something occurs during startup
 // return a channel to notify of nomad client failure
 func (n *NodeReaper) Run() (<-chan bool, error) {
+	zap.L().Info("Running initial node reconciliation")
+	if err := n.reconcile(); err != nil {
+		return nil, err
+	}
 
 	// NOTE: Specifying uint max so that it starts from the next available index. If there is a
 	// better way to start from latest index, we can change this
@@ -68,20 +64,8 @@ func (n *NodeReaper) Run() (<-chan bool, error) {
 	failChan := make(chan bool, 1)
 
 	go func() {
-		// Leader election
-		election, err := elector.New(n.ctx, n.kvStoreClient, n.allocID)
-		if err != nil {
-			zap.L().Error("Unable to set up leader election for node reaper", zap.Error(err))
-			return
-		}
-		zap.L().Info("Waiting for leader election")
-		<-election.SeizeThrone()
-		zap.L().Info("Elected as leader, starting node reaping")
 		tick := time.NewTicker(time.Hour)
 		defer tick.Stop()
-		defer election.StepDown()
-
-		go startKvstoreWatchdog()
 
 		for {
 			select {

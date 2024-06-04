@@ -184,22 +184,22 @@ func run(ctx context.Context, conf config) error {
 		return fmt.Errorf("unable to get local node ID")
 	}
 
-	// Step 1: Leader election
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
 
-	zap.L().Debug("Starting node reaper")
-	node_reaper, err := reapers.NewNodeReaper(ctx, cilium_kvstore.Client(), nomad_client.Nodes(), nomad_client.EventStream(), os.Getenv("NOMAD_ALLOC_ID"), conf.clusterName)
+	// Step 1: Leader election
+	zap.L().Debug("Starting leader reaper")
+	nodeReaper, err := reapers.NewLeaderReaper(ctx, cilium_kvstore.Client(), nomad_client.Nodes(), nomad_client.EventStream(), os.Getenv("NOMAD_ALLOC_ID"), conf.clusterName)
 	if err != nil {
 		return err
 	}
 
-	nodeFailChan, err := node_reaper.Run()
+	leaderFailChan, err := nodeReaper.Run()
 	if err != nil {
-		return fmt.Errorf("unable to start node reaper: %w", err)
+		return fmt.Errorf("unable to start leader reaper: %w", err)
 	}
 
 	// Step 2: Start the reapers
@@ -215,12 +215,12 @@ func run(ctx context.Context, conf config) error {
 	}
 
 	zap.S().Debug("Starting policies reaper")
-	policies_reaper, err := reapers.NewPoliciesReaper(cilium_kvstore.Client(), conf.policiesPrefix, cilium_client)
+	policiesReaper, err := reapers.NewPoliciesReaper(cilium_kvstore.Client(), conf.policiesPrefix, cilium_client)
 	if err != nil {
 		return err
 	}
 
-	policiesFailChan, err := policies_reaper.Run(ctx)
+	policiesFailChan, err := policiesReaper.Run(ctx)
 	if err != nil {
 		return fmt.Errorf("unable to start policies reaper: %w", err)
 	}
@@ -230,8 +230,8 @@ func run(ctx context.Context, conf config) error {
 	case <-c:
 		zap.S().Info("Received interrupt, shutting down")
 		cancel()
-	case <-nodeFailChan:
-		zap.S().Error("nomad node reaper client failed, shutting down")
+	case <-leaderFailChan:
+		zap.S().Error("leader reaper kvstore client failed, shutting down")
 		cancel()
 	case <-endpointFailChan:
 		zap.S().Error("endpoint reaper kvstore client failed, shutting down")

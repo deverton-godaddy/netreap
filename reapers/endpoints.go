@@ -244,7 +244,7 @@ func (e *EndpointReaper) labelEndpoint(endpoint *models.Endpoint, allocation *no
 
 	// Combine the metadata from the job and the task group with the task group taking precedence
 	for k, v := range allocation.Job.Meta {
-		metadata[k] = v
+		metadata[fmt.Sprintf("%s:%s", netreap.LabelSourceNomad, k)] = v
 	}
 
 	for _, taskGroup := range allocation.Job.TaskGroups {

@@ -12,7 +12,6 @@ import (
 	cilium_kvstore "github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/labelsfilter"
 	cilium_logging "github.com/cilium/cilium/pkg/logging"
-	"github.com/cilium/cilium/pkg/option"
 	nomad_api "github.com/hashicorp/nomad/api"
 	"github.com/urfave/cli/v2"
 	"go.uber.org/zap"
@@ -137,7 +136,7 @@ func run(ctx context.Context, conf config) error {
 	}
 	defer logger.Sync()
 
-	if err := labelsfilter.ParseLabelPrefixCfg(option.Config.Labels, option.Config.LabelPrefixFile); err != nil {
+	if err := labelsfilter.ParseLabelPrefixCfg([]string{conf.labels}, conf.labelPrefixFile); err != nil {
 		return fmt.Errorf("unable to parse Label prefix configuration: %w", err)
 	}
 

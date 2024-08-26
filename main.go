@@ -27,7 +27,7 @@ type config struct {
 	debug           bool
 	kvStore         string
 	kvStoreOpts     map[string]string
-	labels          string
+	labels          *cli.StringSlice
 	labelPrefixFile string
 	policiesPrefix  string
 }
@@ -72,10 +72,10 @@ func main() {
 				EnvVars:     []string{"NETREAP_CLUSTER_NAME"},
 				Destination: &conf.clusterName,
 			},
-			&cli.StringFlag{
+			&cli.StringSliceFlag{
 				Name:        "labels",
 				Usage:       "List of label prefixes used to determine identity of an endpoint.",
-				Destination: &conf.labels,
+				Destination: conf.labels,
 			},
 			&cli.StringFlag{
 				Name:        "label-prefix-file",
@@ -136,7 +136,7 @@ func run(ctx context.Context, conf config) error {
 	}
 	defer logger.Sync()
 
-	if err := labelsfilter.ParseLabelPrefixCfg([]string{conf.labels}, conf.labelPrefixFile); err != nil {
+	if err := labelsfilter.ParseLabelPrefixCfg(conf.labels.Value(), conf.labelPrefixFile); err != nil {
 		return fmt.Errorf("unable to parse Label prefix configuration: %w", err)
 	}
 

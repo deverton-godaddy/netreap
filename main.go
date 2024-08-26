@@ -10,7 +10,9 @@ import (
 	cilium_client "github.com/cilium/cilium/pkg/client"
 	cilium_command "github.com/cilium/cilium/pkg/command"
 	cilium_kvstore "github.com/cilium/cilium/pkg/kvstore"
+	"github.com/cilium/cilium/pkg/labelsfilter"
 	cilium_logging "github.com/cilium/cilium/pkg/logging"
+	"github.com/cilium/cilium/pkg/option"
 	nomad_api "github.com/hashicorp/nomad/api"
 	"github.com/urfave/cli/v2"
 	"go.uber.org/zap"
@@ -22,11 +24,13 @@ import (
 var Version = "unreleased"
 
 type config struct {
-	clusterName    string
-	debug          bool
-	kvStore        string
-	kvStoreOpts    map[string]string
-	policiesPrefix string
+	clusterName     string
+	debug           bool
+	kvStore         string
+	kvStoreOpts     map[string]string
+	labels          string
+	labelPrefixFile string
+	policiesPrefix  string
 }
 
 func main() {
@@ -68,6 +72,16 @@ func main() {
 				Usage:       "Cilium cluster name.",
 				EnvVars:     []string{"NETREAP_CLUSTER_NAME"},
 				Destination: &conf.clusterName,
+			},
+			&cli.StringFlag{
+				Name:        "labels",
+				Usage:       "List of label prefixes used to determine identity of an endpoint.",
+				Destination: &conf.labels,
+			},
+			&cli.StringFlag{
+				Name:        "label-prefix-file",
+				Usage:       "Valid label prefixes file path.",
+				Destination: &conf.labelPrefixFile,
 			},
 		},
 		Before: func(ctx *cli.Context) error {
@@ -122,6 +136,10 @@ func run(ctx context.Context, conf config) error {
 		return fmt.Errorf("can't initialize zap logger: %w", err)
 	}
 	defer logger.Sync()
+
+	if err := labelsfilter.ParseLabelPrefixCfg(option.Config.Labels, option.Config.LabelPrefixFile); err != nil {
+		return fmt.Errorf("unable to parse Label prefix configuration: %w", err)
+	}
 
 	// Step 0: Construct the clients
 

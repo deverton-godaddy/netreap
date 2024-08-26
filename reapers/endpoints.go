@@ -4,12 +4,13 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/cilium/cilium/api/v1/models"
 	endpoint_id "github.com/cilium/cilium/pkg/endpoint/id"
+	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/labelsfilter"
 	"github.com/cosmonic-labs/netreap/internal/netreap"
 	nomad_api "github.com/hashicorp/nomad/api"
 	"go.uber.org/zap"
@@ -234,31 +235,14 @@ func (e *EndpointReaper) handleAllocationUpdated(event nomad_api.Event) {
 	e.labelEndpoint(endpoint, allocation)
 }
 
-// stringArrayEqual compares two unordered arrays for equality
-func stringArrayEqual(left []string, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-
-	sort.Strings(left)
-	sort.Strings(right)
-
-	for i, v := range left {
-		if v != right[i] {
-			return false
-		}
-	}
-
-	return true
-}
-
 func (e *EndpointReaper) labelEndpoint(endpoint *models.Endpoint, allocation *nomad_api.Allocation) {
-	newLabels := models.Labels{fmt.Sprintf("%s:%s=%s", netreap.LabelSourceNetreap, netreap.LabelKeyNomadJobID, allocation.JobID)}
-	newLabels = append(newLabels, fmt.Sprintf("%s:%s=%s", netreap.LabelSourceNetreap, netreap.LabelKeyNomadNamespace, allocation.Namespace))
-	newLabels = append(newLabels, fmt.Sprintf("%s:%s=%s", netreap.LabelSourceNetreap, netreap.LabelKeyNomadTaskGroupID, allocation.TaskGroup))
+	metadata := map[string]string{
+		fmt.Sprintf("%s:%s", netreap.LabelSourceNetreap, netreap.LabelKeyNomadJobID):       allocation.JobID,
+		fmt.Sprintf("%s:%s", netreap.LabelSourceNetreap, netreap.LabelKeyNomadNamespace):   allocation.Namespace,
+		fmt.Sprintf("%s:%s", netreap.LabelSourceNetreap, netreap.LabelKeyNomadTaskGroupID): allocation.TaskGroup,
+	}
 
 	// Combine the metadata from the job and the task group with the task group taking precedence
-	metadata := make(map[string]string)
 	for k, v := range allocation.Job.Meta {
 		metadata[k] = v
 	}
@@ -266,41 +250,38 @@ func (e *EndpointReaper) labelEndpoint(endpoint *models.Endpoint, allocation *no
 	for _, taskGroup := range allocation.Job.TaskGroups {
 		if *taskGroup.Name == allocation.TaskGroup {
 			for k, v := range taskGroup.Meta {
-				metadata[k] = v
+				metadata[fmt.Sprintf("%s:%s", netreap.LabelSourceNomad, k)] = v
 			}
 		}
 	}
 
-	for k, v := range metadata {
-		newLabels = append(newLabels, fmt.Sprintf("%s:%s=%s", netreap.LabelSourceNomad, k, v))
-	}
+	// Split labels in to security identifiers and information labels
+	newLabels := labels.Map2Labels(metadata, "")
+	newIdLabels, _ := labelsfilter.Filter(newLabels)
 
-	oldLabels := models.Labels{}
-	oldLabels = append(oldLabels, endpoint.Status.Labels.SecurityRelevant...)
-	oldLabels = append(oldLabels, endpoint.Status.Labels.Derived...)
+	oldIdLabels := labels.NewLabelsFromModel(endpoint.Status.Labels.SecurityRelevant)
 
-	if stringArrayEqual(oldLabels, newLabels) {
-		zap.L().Debug("Labels unchanged so not patching endpoint",
+	// We only patch the endpoint if the security identity labels have changed
+	if oldIdLabels.Equals(newIdLabels) {
+		zap.L().Debug("Skipping endpoint as no security identity labels have changed",
 			zap.String("container-id", allocation.ID),
 			zap.Int64("endpoint-id", endpoint.ID),
-			zap.Strings("new-labels", newLabels),
-			zap.Strings("old-labels", oldLabels),
+			zap.Strings("new-id-labels", newIdLabels.GetPrintableModel()),
+			zap.Strings("old-id-labels", oldIdLabels.GetPrintableModel()),
 		)
-
 		return
 	}
 
 	zap.L().Info("Patching labels on endpoint",
 		zap.String("container-id", allocation.ID),
 		zap.Int64("endpoint-id", endpoint.ID),
-		zap.Strings("new-labels", newLabels),
-		zap.Strings("old-labels", oldLabels),
+		zap.Strings("new-id-labels", newIdLabels.GetPrintableModel()),
 	)
 
 	ecr := &models.EndpointChangeRequest{
 		ContainerID:              allocation.ID,
 		ContainerName:            allocation.Name,
-		Labels:                   newLabels,
+		Labels:                   newLabels.GetModel(),
 		State:                    models.EndpointStateWaitingDashForDashIdentity.Pointer(),
 		DisableLegacyIdentifiers: true,
 		K8sPodName:               allocation.Name,
@@ -316,7 +297,7 @@ func (e *EndpointReaper) labelEndpoint(endpoint *models.Endpoint, allocation *no
 				zap.L().Warn("Hit Cilium API rate limit, retrying",
 					zap.String("container-id", allocation.ID),
 					zap.Int64("endpoint-id", endpoint.ID),
-					zap.Strings("labels", newLabels),
+					zap.Strings("labels", newLabels.GetPrintableModel()),
 				)
 				return err
 			}
@@ -334,7 +315,7 @@ func (e *EndpointReaper) labelEndpoint(endpoint *models.Endpoint, allocation *no
 			zap.L().Error("Error while patching the endpoint labels of container",
 				zap.String("container-id", allocation.ID),
 				zap.Int64("endpoint-id", endpoint.ID),
-				zap.Strings("labels", newLabels),
+				zap.Strings("labels", newLabels.GetPrintableModel()),
 				zap.Error(permanent.Unwrap()),
 			)
 		}

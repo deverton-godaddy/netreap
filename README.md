@@ -241,6 +241,8 @@ clients are available to Netreap.
 | `--policies-prefix`    | `NETREAP_POLICIES_PREFIX` | `netreap/policies/v1` | kvstore prefix that Netreap watches for changes to the Cilium policies JSON value |
 | `--kvstore`            | `NETREAP_KVSTORE`         |                       | Key-value store type, same expected values as Cilium |
 | `--kvstore-opts`       | `NETREAP_KVSTORE_OPTS`    |                       | Key-value store options e.g. etcd.address=127.0.0.1:4001 |
+| `--label-prefix-file`  |                           |                       | Valid label prefixes file path |
+| `--labels`             |                           |                       | List of label prefixes used to determine identity of an endpoint |
 
 Please note that to configure the Nomad, Consul and Cilium clients that Netreap uses,
 we leverage the well defined environment variables for

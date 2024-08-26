@@ -9,6 +9,7 @@ import (
 
 	"github.com/cilium/cilium/api/v1/models"
 	endpoint_id "github.com/cilium/cilium/pkg/endpoint/id"
+	"github.com/cilium/cilium/pkg/labelsfilter"
 	nomad_api "github.com/hashicorp/nomad/api"
 )
 
@@ -70,6 +71,8 @@ func (p *endpointUpdaterMock) EndpointDelete(id string) error {
 }
 
 func TestEndpointReconcile(t *testing.T) {
+	labelsfilter.ParseLabelPrefixCfg([]string{"netreap:.*"}, "")
+
 	endpointOne := &models.Endpoint{
 		ID: 1,
 		Status: &models.EndpointStatus{

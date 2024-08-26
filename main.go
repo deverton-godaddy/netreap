@@ -27,7 +27,7 @@ type config struct {
 	debug           bool
 	kvStore         string
 	kvStoreOpts     map[string]string
-	labels          *cli.StringSlice
+	labels          cli.StringSlice
 	labelPrefixFile string
 	policiesPrefix  string
 }
@@ -75,7 +75,7 @@ func main() {
 			&cli.StringSliceFlag{
 				Name:        "labels",
 				Usage:       "List of label prefixes used to determine identity of an endpoint.",
-				Destination: conf.labels,
+				Destination: &conf.labels,
 			},
 			&cli.StringFlag{
 				Name:        "label-prefix-file",

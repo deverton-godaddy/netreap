@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -145,6 +146,9 @@ func TestEndpointReconcile(t *testing.T) {
 					if ep.ContainerID != expectedContainerID {
 						t.Errorf("wrong container ID passed, expected %v, got %v", expectedContainerID, ep.ContainerID)
 					}
+
+					slices.Sort(ep.Labels)
+					slices.Sort(endpointOneLabels)
 
 					if !reflect.DeepEqual(ep.Labels, endpointOneLabels) {
 						t.Errorf("wrong labels, expected %v, got %v", endpointOneLabels, ep.Labels)

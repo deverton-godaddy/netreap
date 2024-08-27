@@ -262,9 +262,9 @@ func (p *PoliciesReaper) getCurrentPolicies() (map[string]api.Rules, error) {
 	for _, rule := range rules {
 
 		// the call to Sanitize() is necessary to ensure that the policy is in a valid state as the JSON doesn't fully encode the policy
-		// if err := rule.Sanitize(); err != nil {
-		// 	return nil, fmt.Errorf("unable to sanitize network policy: %w", err)
-		// }
+		if err := rule.Sanitize(); err != nil {
+			return nil, fmt.Errorf("unable to sanitize network policy: %w", err)
+		}
 
 		policyName := rule.Labels.Get(netreap.LabelSourceNetreapKeyPrefix + netreap.LabelKeyCiliumPolicyName)
 		rulesByName[policyName] = append(rulesByName[policyName], rule)

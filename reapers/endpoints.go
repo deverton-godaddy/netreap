@@ -118,15 +118,27 @@ func (e *EndpointReaper) reconcile() error {
 	zap.L().Debug("checking each endpoint", zap.Int("endpoints-total", len(endpoints)))
 
 	for _, endpoint := range endpoints {
-		containerID := endpoint.Status.ExternalIdentifiers.ContainerID
+		cniAttachmentID := endpoint.Status.ExternalIdentifiers.CniAttachmentID
 
-		// Only managing endpoints with container IDs
-		if containerID == "" {
+		// Only managing endpoints with CNI attachment IDs
+		if cniAttachmentID == "" {
 			zap.L().Debug("Skipping endpoint that is not associated with a container",
 				zap.Int64("endpoint-id", endpoint.ID),
 			)
 			continue
 		}
+
+		// Extract the container ID from the CNI attachment ID
+		parts := strings.Split(cniAttachmentID, ":")
+		if len(parts) != 2 {
+			zap.L().Warn("Invalid CNI attachment ID, skipping endpoint",
+				zap.Int64("endpoint-id", endpoint.ID),
+				zap.String("cni-attachment-id", cniAttachmentID),
+			)
+			continue
+		}
+
+		containerID := parts[0]
 
 		// Nomad calls the CNI plugin with the allocation ID as the container ID
 		allocation, _, err := e.nomadAllocations.Info(containerID, &nomad_api.QueryOptions{Namespace: "*"})

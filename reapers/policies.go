@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/cosmonic-labs/netreap/internal/netreap"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/cilium/cilium/pkg/fqdn/re"
 	"github.com/cilium/cilium/pkg/kvstore"
@@ -45,7 +47,7 @@ func NewPoliciesReaper(kvStoreClient kvstore.BackendOperations, prefix string, c
 	}, nil
 }
 
-func (p *PoliciesReaper) Run(ctx context.Context) (<-chan bool, error) {
+func (p *PoliciesReaper) Run(ctx context.Context, concurrency int) (<-chan bool, error) {
 	zap.L().Info("Keeping agent policy state in sync with kvstore")
 
 	failChan := make(chan bool, 1)
@@ -55,7 +57,7 @@ func (p *PoliciesReaper) Run(ctx context.Context) (<-chan bool, error) {
 
 		zap.L().Info("Synchronizing agent policy state with kvstore")
 
-		err := p.reconcile(ctx, watcher)
+		err := p.reconcile(ctx, watcher, concurrency)
 		if err != nil {
 			zap.L().Error("Unable to reconcile initial policies", zap.Error(err))
 			failChan <- true
@@ -92,11 +94,16 @@ func (p *PoliciesReaper) Run(ctx context.Context) (<-chan bool, error) {
 	return failChan, nil
 }
 
-func (p *PoliciesReaper) reconcile(ctx context.Context, watcher *kvstore.Watcher) error {
+func (p *PoliciesReaper) reconcile(ctx context.Context, watcher *kvstore.Watcher, concurrency int) error {
 	oldPolicies, err := p.getCurrentPolicies()
 	if err != nil {
 		return err
 	}
+
+	oldPoliciesMutex := &sync.RWMutex{}
+
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(concurrency)
 
 	for event := range watcher.Events {
 		logger := zap.L().With(
@@ -104,38 +111,43 @@ func (p *PoliciesReaper) reconcile(ctx context.Context, watcher *kvstore.Watcher
 			zap.String("event-type", event.Typ.String()),
 		)
 
-		err := p.handleSyncPolicyEvent(logger, oldPolicies, event)
-		if err != nil {
-			logger.Error("Unable to handle policy event", zap.ByteString("event-value", event.Value), zap.Error(err))
-			return err
-		}
-
 		if event.Typ == kvstore.EventTypeListDone {
 			logger.Info("Initial policies sync complete")
 			break
 		}
-	}
 
-	return ctx.Err()
-}
+		e := event
 
-func (p *PoliciesReaper) handleSyncPolicyEvent(logger *zap.Logger, oldPolicies map[string]api.Rules, event kvstore.KeyValueEvent) error {
-	if event.Typ == kvstore.EventTypeListDone {
-		// Anything left in the initial state map wasn't in the kvstore so should be deleted
-		for oldKeyName := range oldPolicies {
-			labels := getIdentityLabels(oldKeyName)
-
-			logger.Debug("Deleting local policy not found in kvstore", zap.Strings("labels", labels.GetModel()))
-
-			_, err := p.cilium.PolicyDelete(labels.GetModel())
+		g.Go(func() error {
+			err := p.handleSyncPolicyEvent(logger, oldPoliciesMutex, oldPolicies, e)
 			if err != nil {
+				logger.Error("Unable to handle policy event", zap.ByteString("event-value", e.Value), zap.Error(err))
 				return err
 			}
-		}
-
-		return nil
+			return nil
+		})
 	}
 
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	// Anything left in the initial state map wasn't in the kvstore so should be deleted
+	for oldKeyName := range oldPolicies {
+		labels := getIdentityLabels(oldKeyName)
+
+		zap.L().Info("Deleting local policy not found in kvstore", zap.Strings("labels", labels.GetModel()))
+
+		_, err := p.cilium.PolicyDelete(labels.GetModel())
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (p *PoliciesReaper) handleSyncPolicyEvent(logger *zap.Logger, oldPoliciesMutex *sync.RWMutex, oldPolicies map[string]api.Rules, event kvstore.KeyValueEvent) error {
 	keyName := strings.TrimPrefix(event.Key, p.prefix)
 	if keyName[0] == '/' {
 		keyName = keyName[1:]
@@ -151,14 +163,22 @@ func (p *PoliciesReaper) handleSyncPolicyEvent(logger *zap.Logger, oldPolicies m
 			return err
 		}
 
+		oldPoliciesMutex.RLock()
 		oldRules, ok := oldPolicies[keyName]
-		delete(oldPolicies, keyName)
-		if ok && oldRules.DeepEqual(newRules) {
-			logger.Debug("Skipping unchanged policy", zap.Strings("labels", labels.GetModel()))
-			return nil
+		oldPoliciesMutex.RUnlock()
+
+		if ok {
+			oldPoliciesMutex.Lock()
+			delete(oldPolicies, keyName)
+			oldPoliciesMutex.Unlock()
+
+			if oldRules.DeepEqual(newRules) {
+				logger.Info("Skipping unchanged policy", zap.Strings("labels", labels.GetModel()))
+				return nil
+			}
 		}
 
-		logger.Debug("Creating policy", zap.Strings("labels", labels.GetModel()))
+		logger.Info("Creating policy", zap.Strings("labels", labels.GetModel()))
 
 		rulesValue, err := json.Marshal(newRules)
 		if err != nil {
@@ -179,14 +199,14 @@ func (p *PoliciesReaper) handleSyncPolicyEvent(logger *zap.Logger, oldPolicies m
 		return fmt.Errorf("Received delete event during initial kvstore sync, this should never happen")
 	}
 
-	return fmt.Errorf("Unhandled sync even type: %+v", event)
+	return fmt.Errorf("Unhandled sync event type: %+v", event)
 }
 
 func (p *PoliciesReaper) handlePolicyEvent(logger *zap.Logger, keyName string, event kvstore.KeyValueEvent) error {
 	labels := getIdentityLabels(keyName)
 
 	if event.Typ == kvstore.EventTypeDelete {
-		logger.Debug("Deleting policy", zap.Strings("labels", labels.GetModel()))
+		logger.Info("Deleting policy", zap.Strings("labels", labels.GetModel()))
 
 		_, err := p.cilium.PolicyDelete(labels.GetModel())
 		if err != nil {
@@ -207,7 +227,7 @@ func (p *PoliciesReaper) handlePolicyEvent(logger *zap.Logger, keyName string, e
 	}
 
 	if event.Typ == kvstore.EventTypeCreate {
-		logger.Debug("Creating policy", zap.Strings("labels", labels.GetModel()))
+		logger.Info("Creating policy", zap.Strings("labels", labels.GetModel()))
 
 		_, err = p.cilium.PolicyReplace(string(newRulesValue), false, nil)
 		if err != nil {
@@ -228,11 +248,11 @@ func (p *PoliciesReaper) handlePolicyEvent(logger *zap.Logger, keyName string, e
 		}
 
 		if oldRules.DeepEqual(newRules) {
-			logger.Debug("Ignoring unchanged policy", zap.Strings("labels", labels.GetModel()))
+			logger.Info("Ignoring unchanged policy", zap.Strings("labels", labels.GetModel()))
 			return nil
 		}
 
-		logger.Debug("Replacing policy", zap.Strings("labels", labels.GetModel()))
+		logger.Info("Replacing policy", zap.Strings("labels", labels.GetModel()))
 
 		_, err = p.cilium.PolicyReplace(string(newRulesValue), false, labels.GetModel())
 		if err != nil {

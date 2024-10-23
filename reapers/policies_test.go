@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/kvstore"
@@ -384,7 +385,10 @@ func TestSyncDeleteOrphan(t *testing.T) {
 		Typ: kvstore.EventTypeListDone,
 	}
 
-	policiesReaper.reconcile(context.Background(), watcher, 2)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
+	defer cancel()
+
+	policiesReaper.reconcile(ctx, watcher, 2)
 
 	assert.Len(t, cilium.rules, 2, "Failed to delete orphaned rule")
 	for _, r := range cilium.rules {

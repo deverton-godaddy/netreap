@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/cosmonic-labs/netreap/internal/netreap"
 	"golang.org/x/sync/errgroup"
@@ -100,32 +99,59 @@ func (p *PoliciesReaper) reconcile(ctx context.Context, watcher *kvstore.Watcher
 		return err
 	}
 
-	oldPoliciesMutex := &sync.RWMutex{}
-
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(concurrency)
 
-	for event := range watcher.Events {
-		logger := zap.L().With(
-			zap.String("event-key", event.Key),
-			zap.String("event-type", event.Typ.String()),
-		)
+	for listDone := false; !listDone; {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case event := <-watcher.Events:
+			logger := zap.L().With(
+				zap.String("event-key", event.Key),
+				zap.String("event-type", event.Typ.String()),
+			)
 
-		if event.Typ == kvstore.EventTypeListDone {
-			logger.Info("Initial policies sync complete")
-			break
-		}
+			switch event.Typ {
 
-		e := event
+			case kvstore.EventTypeCreate:
+				e := event
 
-		g.Go(func() error {
-			err := p.handleSyncPolicyEvent(logger, oldPoliciesMutex, oldPolicies, e)
-			if err != nil {
-				logger.Error("Unable to handle policy event", zap.ByteString("event-value", e.Value), zap.Error(err))
-				return err
+				keyName := strings.TrimPrefix(event.Key, p.prefix)
+				if keyName[0] == '/' {
+					keyName = keyName[1:]
+				}
+
+				labels := getIdentityLabels(keyName)
+
+				oldPolicy, ok := oldPolicies[keyName]
+				if ok {
+					delete(oldPolicies, keyName)
+				}
+
+				g.Go(func() error {
+					err := p.reconcilePolicy(logger, labels, oldPolicy, e)
+					if err != nil {
+						logger.Error("Unable to handle policy event", zap.ByteString("event-value", e.Value), zap.Error(err))
+						return err
+					}
+					return nil
+				})
+
+			case kvstore.EventTypeModify:
+				return fmt.Errorf("Received modify event during initial kvstore sync, this should never happen")
+
+			case kvstore.EventTypeDelete:
+				return fmt.Errorf("Received delete event during initial kvstore sync, this should never happen")
+
+			case kvstore.EventTypeListDone:
+				logger.Info("Initial policies sync complete")
+				listDone = true
+
+			default:
+				return fmt.Errorf("Unhandled sync event type: %+v", event)
 			}
-			return nil
-		})
+		}
 	}
 
 	if err := g.Wait(); err != nil {
@@ -147,59 +173,30 @@ func (p *PoliciesReaper) reconcile(ctx context.Context, watcher *kvstore.Watcher
 	return nil
 }
 
-func (p *PoliciesReaper) handleSyncPolicyEvent(logger *zap.Logger, oldPoliciesMutex *sync.RWMutex, oldPolicies map[string]api.Rules, event kvstore.KeyValueEvent) error {
-	keyName := strings.TrimPrefix(event.Key, p.prefix)
-	if keyName[0] == '/' {
-		keyName = keyName[1:]
+func (p *PoliciesReaper) reconcilePolicy(logger *zap.Logger, labels labels.LabelArray, oldRules api.Rules, event kvstore.KeyValueEvent) error {
+	newRules, err := parseRules(labels, event.Value)
+	if err != nil {
+		return err
 	}
 
-	switch event.Typ {
-	case kvstore.EventTypeCreate:
-
-		labels := getIdentityLabels(keyName)
-
-		newRules, err := parseRules(labels, event.Value)
-		if err != nil {
-			return err
-		}
-
-		oldPoliciesMutex.RLock()
-		oldRules, ok := oldPolicies[keyName]
-		oldPoliciesMutex.RUnlock()
-
-		if ok {
-			oldPoliciesMutex.Lock()
-			delete(oldPolicies, keyName)
-			oldPoliciesMutex.Unlock()
-
-			if oldRules.DeepEqual(newRules) {
-				logger.Info("Skipping unchanged policy", zap.Strings("labels", labels.GetModel()))
-				return nil
-			}
-		}
-
-		logger.Info("Creating policy", zap.Strings("labels", labels.GetModel()))
-
-		rulesValue, err := json.Marshal(newRules)
-		if err != nil {
-			return err
-		}
-
-		_, err = p.cilium.PolicyReplace(string(rulesValue), true, labels.GetModel())
-		if err != nil {
-			return err
-		}
-
+	if oldRules.DeepEqual(newRules) {
+		logger.Info("Skipping unchanged policy", zap.Strings("labels", labels.GetModel()))
 		return nil
-
-	case kvstore.EventTypeModify:
-		return fmt.Errorf("Received modify event during initial kvstore sync, this should never happen")
-
-	case kvstore.EventTypeDelete:
-		return fmt.Errorf("Received delete event during initial kvstore sync, this should never happen")
 	}
 
-	return fmt.Errorf("Unhandled sync event type: %+v", event)
+	logger.Info("Creating policy", zap.Strings("labels", labels.GetModel()))
+
+	rulesValue, err := json.Marshal(newRules)
+	if err != nil {
+		return err
+	}
+
+	_, err = p.cilium.PolicyReplace(string(rulesValue), true, labels.GetModel())
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (p *PoliciesReaper) handlePolicyEvent(logger *zap.Logger, keyName string, event kvstore.KeyValueEvent) error {

@@ -162,7 +162,7 @@ func (p *PoliciesReaper) reconcile(ctx context.Context, watcher *kvstore.Watcher
 	for oldKeyName := range oldPolicies {
 		labels := getIdentityLabels(oldKeyName)
 
-		zap.L().Info("Deleting local policy not found in kvstore", zap.Strings("labels", labels.GetModel()))
+		zap.L().Debug("Deleting local policy not found in kvstore", zap.Strings("labels", labels.GetModel()))
 
 		_, err := p.cilium.PolicyDelete(labels.GetModel())
 		if err != nil {
@@ -180,11 +180,11 @@ func (p *PoliciesReaper) reconcilePolicy(logger *zap.Logger, labels labels.Label
 	}
 
 	if oldRules.DeepEqual(newRules) {
-		logger.Info("Skipping unchanged policy", zap.Strings("labels", labels.GetModel()))
+		logger.Debug("Skipping unchanged policy", zap.Strings("labels", labels.GetModel()))
 		return nil
 	}
 
-	logger.Info("Creating policy", zap.Strings("labels", labels.GetModel()))
+	logger.Debug("Creating policy", zap.Strings("labels", labels.GetModel()))
 
 	rulesValue, err := json.Marshal(newRules)
 	if err != nil {
@@ -203,7 +203,7 @@ func (p *PoliciesReaper) handlePolicyEvent(logger *zap.Logger, keyName string, e
 	labels := getIdentityLabels(keyName)
 
 	if event.Typ == kvstore.EventTypeDelete {
-		logger.Info("Deleting policy", zap.Strings("labels", labels.GetModel()))
+		logger.Debug("Deleting policy", zap.Strings("labels", labels.GetModel()))
 
 		_, err := p.cilium.PolicyDelete(labels.GetModel())
 		if err != nil {
@@ -224,7 +224,7 @@ func (p *PoliciesReaper) handlePolicyEvent(logger *zap.Logger, keyName string, e
 	}
 
 	if event.Typ == kvstore.EventTypeCreate {
-		logger.Info("Creating policy", zap.Strings("labels", labels.GetModel()))
+		logger.Debug("Creating policy", zap.Strings("labels", labels.GetModel()))
 
 		_, err = p.cilium.PolicyReplace(string(newRulesValue), false, nil)
 		if err != nil {
@@ -245,11 +245,11 @@ func (p *PoliciesReaper) handlePolicyEvent(logger *zap.Logger, keyName string, e
 		}
 
 		if oldRules.DeepEqual(newRules) {
-			logger.Info("Ignoring unchanged policy", zap.Strings("labels", labels.GetModel()))
+			logger.Debug("Ignoring unchanged policy", zap.Strings("labels", labels.GetModel()))
 			return nil
 		}
 
-		logger.Info("Replacing policy", zap.Strings("labels", labels.GetModel()))
+		logger.Debug("Replacing policy", zap.Strings("labels", labels.GetModel()))
 
 		_, err = p.cilium.PolicyReplace(string(newRulesValue), false, labels.GetModel())
 		if err != nil {

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/cosmonic-labs/netreap/internal/netreap"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/cilium/cilium/pkg/fqdn/re"
 	"github.com/cilium/cilium/pkg/kvstore"
@@ -45,7 +46,7 @@ func NewPoliciesReaper(kvStoreClient kvstore.BackendOperations, prefix string, c
 	}, nil
 }
 
-func (p *PoliciesReaper) Run(ctx context.Context) (<-chan bool, error) {
+func (p *PoliciesReaper) Run(ctx context.Context, concurrency int) (<-chan bool, error) {
 	zap.L().Info("Keeping agent policy state in sync with kvstore")
 
 	failChan := make(chan bool, 1)
@@ -55,7 +56,7 @@ func (p *PoliciesReaper) Run(ctx context.Context) (<-chan bool, error) {
 
 		zap.L().Info("Synchronizing agent policy state with kvstore")
 
-		err := p.reconcile(ctx, watcher)
+		err := p.reconcile(ctx, watcher, concurrency)
 		if err != nil {
 			zap.L().Error("Unable to reconcile initial policies", zap.Error(err))
 			failChan <- true
@@ -92,94 +93,110 @@ func (p *PoliciesReaper) Run(ctx context.Context) (<-chan bool, error) {
 	return failChan, nil
 }
 
-func (p *PoliciesReaper) reconcile(ctx context.Context, watcher *kvstore.Watcher) error {
+func (p *PoliciesReaper) reconcile(ctx context.Context, watcher *kvstore.Watcher, concurrency int) error {
 	oldPolicies, err := p.getCurrentPolicies()
 	if err != nil {
 		return err
 	}
 
-	for event := range watcher.Events {
-		logger := zap.L().With(
-			zap.String("event-key", event.Key),
-			zap.String("event-type", event.Typ.String()),
-		)
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(concurrency)
 
-		err := p.handleSyncPolicyEvent(logger, oldPolicies, event)
-		if err != nil {
-			logger.Error("Unable to handle policy event", zap.ByteString("event-value", event.Value), zap.Error(err))
-			return err
-		}
+	for listDone := false; !listDone; {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case event := <-watcher.Events:
+			logger := zap.L().With(
+				zap.String("event-key", event.Key),
+				zap.String("event-type", event.Typ.String()),
+			)
 
-		if event.Typ == kvstore.EventTypeListDone {
-			logger.Info("Initial policies sync complete")
-			break
-		}
-	}
+			switch event.Typ {
 
-	return ctx.Err()
-}
+			case kvstore.EventTypeCreate:
+				e := event
 
-func (p *PoliciesReaper) handleSyncPolicyEvent(logger *zap.Logger, oldPolicies map[string]api.Rules, event kvstore.KeyValueEvent) error {
-	if event.Typ == kvstore.EventTypeListDone {
-		// Anything left in the initial state map wasn't in the kvstore so should be deleted
-		for oldKeyName := range oldPolicies {
-			labels := getIdentityLabels(oldKeyName)
+				keyName := strings.TrimPrefix(event.Key, p.prefix)
+				if keyName[0] == '/' {
+					keyName = keyName[1:]
+				}
 
-			logger.Debug("Deleting local policy not found in kvstore", zap.Strings("labels", labels.GetModel()))
+				labels := getIdentityLabels(keyName)
 
-			_, err := p.cilium.PolicyDelete(labels.GetModel())
-			if err != nil {
-				return err
+				oldPolicy, ok := oldPolicies[keyName]
+				if ok {
+					delete(oldPolicies, keyName)
+				}
+
+				g.Go(func() error {
+					err := p.reconcilePolicy(logger, labels, oldPolicy, e)
+					if err != nil {
+						logger.Error("Unable to handle policy event", zap.ByteString("event-value", e.Value), zap.Error(err))
+						return err
+					}
+					return nil
+				})
+
+			case kvstore.EventTypeModify:
+				return fmt.Errorf("Received modify event during initial kvstore sync, this should never happen")
+
+			case kvstore.EventTypeDelete:
+				return fmt.Errorf("Received delete event during initial kvstore sync, this should never happen")
+
+			case kvstore.EventTypeListDone:
+				logger.Info("Initial policies sync complete")
+				listDone = true
+
+			default:
+				return fmt.Errorf("Unhandled sync event type: %+v", event)
 			}
 		}
+	}
 
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	// Anything left in the initial state map wasn't in the kvstore so should be deleted
+	for oldKeyName := range oldPolicies {
+		labels := getIdentityLabels(oldKeyName)
+
+		zap.L().Debug("Deleting local policy not found in kvstore", zap.Strings("labels", labels.GetModel()))
+
+		_, err := p.cilium.PolicyDelete(labels.GetModel())
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (p *PoliciesReaper) reconcilePolicy(logger *zap.Logger, labels labels.LabelArray, oldRules api.Rules, event kvstore.KeyValueEvent) error {
+	newRules, err := parseRules(labels, event.Value)
+	if err != nil {
+		return err
+	}
+
+	if oldRules.DeepEqual(newRules) {
+		logger.Debug("Skipping unchanged policy", zap.Strings("labels", labels.GetModel()))
 		return nil
 	}
 
-	keyName := strings.TrimPrefix(event.Key, p.prefix)
-	if keyName[0] == '/' {
-		keyName = keyName[1:]
+	logger.Debug("Creating policy", zap.Strings("labels", labels.GetModel()))
+
+	rulesValue, err := json.Marshal(newRules)
+	if err != nil {
+		return err
 	}
 
-	switch event.Typ {
-	case kvstore.EventTypeCreate:
-
-		labels := getIdentityLabels(keyName)
-
-		newRules, err := parseRules(labels, event.Value)
-		if err != nil {
-			return err
-		}
-
-		oldRules, ok := oldPolicies[keyName]
-		delete(oldPolicies, keyName)
-		if ok && oldRules.DeepEqual(newRules) {
-			logger.Debug("Skipping unchanged policy", zap.Strings("labels", labels.GetModel()))
-			return nil
-		}
-
-		logger.Debug("Creating policy", zap.Strings("labels", labels.GetModel()))
-
-		rulesValue, err := json.Marshal(newRules)
-		if err != nil {
-			return err
-		}
-
-		_, err = p.cilium.PolicyReplace(string(rulesValue), true, labels.GetModel())
-		if err != nil {
-			return err
-		}
-
-		return nil
-
-	case kvstore.EventTypeModify:
-		return fmt.Errorf("Received modify event during initial kvstore sync, this should never happen")
-
-	case kvstore.EventTypeDelete:
-		return fmt.Errorf("Received delete event during initial kvstore sync, this should never happen")
+	_, err = p.cilium.PolicyReplace(string(rulesValue), true, labels.GetModel())
+	if err != nil {
+		return err
 	}
 
-	return fmt.Errorf("Unhandled sync even type: %+v", event)
+	return nil
 }
 
 func (p *PoliciesReaper) handlePolicyEvent(logger *zap.Logger, keyName string, event kvstore.KeyValueEvent) error {

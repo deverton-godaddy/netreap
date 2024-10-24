@@ -1,14 +1,19 @@
 package reapers
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/policy/api"
 	"go.uber.org/zap"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type testPolicyRepository struct {
@@ -230,14 +235,10 @@ func TestModifyPolicyEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(cilium.rules) != 2 {
-		t.Fatalf("Should not have changed rule store size")
-	}
+	assert.Len(t, cilium.rules, 2, "Should not have changed rule store size")
 
 	// Modified rules get added to the end
-	if cilium.rules[1].Description != "one - modified" {
-		t.Fatalf("Failed to modify correct rule")
-	}
+	assert.Equal(t, "one - modified", cilium.rules[1].Description, "Failed to modify correct rule")
 }
 
 func TestModifyPolicyEventNoDifference(t *testing.T) {
@@ -335,78 +336,63 @@ func TestSyncDeleteOrphan(t *testing.T) {
 	}
 
 	policiesReaper, err := NewPoliciesReaper(nil, "", cilium)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	one := api.Rules{
 		api.NewRule().
 			WithDescription("one").
 			WithEndpointSelector(api.EndpointSelectorNone),
 	}
-
 	oneValue, err := json.Marshal(one)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	two := api.Rules{
 		api.NewRule().
 			WithDescription("two").
 			WithEndpointSelector(api.EndpointSelectorNone),
 	}
-
 	twoValue, err := json.Marshal(two)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
-	oldRules := api.Rules{
+	three := api.Rules{
 		api.NewRule().
 			WithDescription("three").
 			WithLabels(getIdentityLabels("three")).
 			WithEndpointSelector(api.EndpointSelectorNone),
 	}
 	oldPolicies := make(map[string]api.Rules)
-	oldPolicies["three"] = oldRules
+	oldPolicies["three"] = three
 
-	cilium.add(oldRules)
+	cilium.add(three)
 
-	err = policiesReaper.handleSyncPolicyEvent(zap.L(), oldPolicies, kvstore.KeyValueEvent{
+	eventsChan := make(chan kvstore.KeyValueEvent, 3)
+
+	watcher := &kvstore.Watcher{
+		Events: eventsChan,
+	}
+
+	eventsChan <- kvstore.KeyValueEvent{
 		Typ:   kvstore.EventTypeCreate,
 		Key:   "one",
 		Value: oneValue,
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
-
-	policiesReaper.handleSyncPolicyEvent(zap.L(), oldPolicies, kvstore.KeyValueEvent{
+	eventsChan <- kvstore.KeyValueEvent{
 		Typ:   kvstore.EventTypeCreate,
 		Key:   "two",
 		Value: twoValue,
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
-
-	policiesReaper.handleSyncPolicyEvent(zap.L(), oldPolicies, kvstore.KeyValueEvent{
+	eventsChan <- kvstore.KeyValueEvent{
 		Typ: kvstore.EventTypeListDone,
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 
-	if len(cilium.rules) != 2 {
-		t.Fatalf("Failed to delete orphaned rule")
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
+	defer cancel()
 
-	if cilium.rules[0].Description != "one" {
-		t.Fatalf("Expected rule 'one', got : %v", cilium.rules[0])
-	}
+	policiesReaper.reconcile(ctx, watcher, 2)
 
-	if cilium.rules[1].Description != "two" {
-		t.Fatalf("Expected rule 'two', got : %v", cilium.rules[1])
+	assert.Len(t, cilium.rules, 2, "Failed to delete orphaned rule")
+	for _, r := range cilium.rules {
+		assert.NotEqual(t, r.Description, "three", "Failed to delete orphaned rule")
 	}
 
 }

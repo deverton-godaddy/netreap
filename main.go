@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"runtime"
 
 	cilium_client "github.com/cilium/cilium/pkg/client"
 	cilium_command "github.com/cilium/cilium/pkg/command"
@@ -31,7 +30,6 @@ type config struct {
 	labels          cli.StringSlice
 	labelPrefixFile string
 	policiesPrefix  string
-	concurrency     int
 }
 
 func main() {
@@ -83,12 +81,6 @@ func main() {
 				Name:        "label-prefix-file",
 				Usage:       "Valid label prefixes file path.",
 				Destination: &conf.labelPrefixFile,
-			},
-			&cli.IntFlag{
-				Name:        "concurrency",
-				Usage:       "Maximum concurrency when calling Cilium APIs.",
-				Destination: &conf.concurrency,
-				Value:       min(4, runtime.NumCPU()),
 			},
 		},
 		Before: func(ctx *cli.Context) error {
@@ -245,7 +237,7 @@ func run(ctx context.Context, conf config) error {
 		return err
 	}
 
-	policiesFailChan, err := policiesReaper.Run(ctx, conf.concurrency)
+	policiesFailChan, err := policiesReaper.Run(ctx)
 	if err != nil {
 		return fmt.Errorf("unable to start policies reaper: %w", err)
 	}

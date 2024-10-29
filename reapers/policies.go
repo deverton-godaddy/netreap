@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/cosmonic-labs/netreap/internal/netreap"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/cilium/cilium/pkg/fqdn/re"
 	"github.com/cilium/cilium/pkg/kvstore"
@@ -46,7 +45,7 @@ func NewPoliciesReaper(kvStoreClient kvstore.BackendOperations, prefix string, c
 	}, nil
 }
 
-func (p *PoliciesReaper) Run(ctx context.Context, concurrency int) (<-chan bool, error) {
+func (p *PoliciesReaper) Run(ctx context.Context) (<-chan bool, error) {
 	zap.L().Info("Keeping agent policy state in sync with kvstore")
 
 	failChan := make(chan bool, 1)
@@ -56,7 +55,7 @@ func (p *PoliciesReaper) Run(ctx context.Context, concurrency int) (<-chan bool,
 
 		zap.L().Info("Synchronizing agent policy state with kvstore")
 
-		err := p.reconcile(ctx, watcher, concurrency)
+		err := p.reconcile(ctx, watcher)
 		if err != nil {
 			zap.L().Error("Unable to reconcile initial policies", zap.Error(err))
 			failChan <- true
@@ -93,14 +92,13 @@ func (p *PoliciesReaper) Run(ctx context.Context, concurrency int) (<-chan bool,
 	return failChan, nil
 }
 
-func (p *PoliciesReaper) reconcile(ctx context.Context, watcher *kvstore.Watcher, concurrency int) error {
+func (p *PoliciesReaper) reconcile(ctx context.Context, watcher *kvstore.Watcher) error {
 	oldPolicies, err := p.getCurrentPolicies()
 	if err != nil {
 		return err
 	}
 
-	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(concurrency)
+	newPolicies := api.Rules{}
 
 	for listDone := false; !listDone; {
 		select {
@@ -115,8 +113,6 @@ func (p *PoliciesReaper) reconcile(ctx context.Context, watcher *kvstore.Watcher
 			switch event.Typ {
 
 			case kvstore.EventTypeCreate:
-				e := event
-
 				keyName := strings.TrimPrefix(event.Key, p.prefix)
 				if keyName[0] == '/' {
 					keyName = keyName[1:]
@@ -129,14 +125,19 @@ func (p *PoliciesReaper) reconcile(ctx context.Context, watcher *kvstore.Watcher
 					delete(oldPolicies, keyName)
 				}
 
-				g.Go(func() error {
-					err := p.reconcilePolicy(logger, labels, oldPolicy, e)
-					if err != nil {
-						logger.Error("Unable to handle policy event", zap.ByteString("event-value", e.Value), zap.Error(err))
-						return err
-					}
+				newPolicy, err := parseRules(labels, event.Value)
+				if err != nil {
+					return err
+				}
+
+				if oldPolicy.DeepEqual(&newPolicy) {
+					logger.Debug("Skipping unchanged policy", zap.Strings("labels", labels.GetModel()))
 					return nil
-				})
+				}
+
+				for _, rule := range newPolicy {
+					newPolicies = append(newPolicies, rule)
+				}
 
 			case kvstore.EventTypeModify:
 				return fmt.Errorf("Received modify event during initial kvstore sync, this should never happen")
@@ -154,7 +155,13 @@ func (p *PoliciesReaper) reconcile(ctx context.Context, watcher *kvstore.Watcher
 		}
 	}
 
-	if err := g.Wait(); err != nil {
+	b, err := json.Marshal(newPolicies)
+	if err != nil {
+		return err
+	}
+
+	_, err = p.cilium.PolicyReplace(string(b), true, nil)
+	if err != nil {
 		return err
 	}
 
@@ -168,32 +175,6 @@ func (p *PoliciesReaper) reconcile(ctx context.Context, watcher *kvstore.Watcher
 		if err != nil {
 			return err
 		}
-	}
-
-	return nil
-}
-
-func (p *PoliciesReaper) reconcilePolicy(logger *zap.Logger, labels labels.LabelArray, oldRules api.Rules, event kvstore.KeyValueEvent) error {
-	newRules, err := parseRules(labels, event.Value)
-	if err != nil {
-		return err
-	}
-
-	if oldRules.DeepEqual(newRules) {
-		logger.Debug("Skipping unchanged policy", zap.Strings("labels", labels.GetModel()))
-		return nil
-	}
-
-	logger.Debug("Creating policy", zap.Strings("labels", labels.GetModel()))
-
-	rulesValue, err := json.Marshal(newRules)
-	if err != nil {
-		return err
-	}
-
-	_, err = p.cilium.PolicyReplace(string(rulesValue), true, labels.GetModel())
-	if err != nil {
-		return err
 	}
 
 	return nil
@@ -244,7 +225,7 @@ func (p *PoliciesReaper) handlePolicyEvent(logger *zap.Logger, keyName string, e
 			return err
 		}
 
-		if oldRules.DeepEqual(newRules) {
+		if oldRules.DeepEqual(&newRules) {
 			logger.Debug("Ignoring unchanged policy", zap.Strings("labels", labels.GetModel()))
 			return nil
 		}
@@ -290,7 +271,7 @@ func (p *PoliciesReaper) getCurrentPolicies() (map[string]api.Rules, error) {
 	return rulesByName, nil
 }
 
-func parseRules(policyLabels labels.LabelArray, value []byte) (*api.Rules, error) {
+func parseRules(policyLabels labels.LabelArray, value []byte) (api.Rules, error) {
 	rules := api.Rules{}
 
 	err := json.Unmarshal(value, &rules)
@@ -306,7 +287,7 @@ func parseRules(policyLabels labels.LabelArray, value []byte) (*api.Rules, error
 		rule.Labels = append(policyLabels, rule.Labels...).Sort()
 	}
 
-	return &rules, nil
+	return rules, nil
 }
 
 func getIdentityLabels(name string) labels.LabelArray {

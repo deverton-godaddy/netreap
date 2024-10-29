@@ -330,7 +330,7 @@ func TestDeletePolicyEvent(t *testing.T) {
 	}
 }
 
-func TestSyncDeleteOrphan(t *testing.T) {
+func TestReoncileDeleteOrphan(t *testing.T) {
 	cilium := &testPolicyRepository{
 		rules: make(api.Rules, 0),
 	}
@@ -388,11 +388,70 @@ func TestSyncDeleteOrphan(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
 	defer cancel()
 
-	policiesReaper.reconcile(ctx, watcher, 2)
+	policiesReaper.reconcile(ctx, watcher)
 
 	assert.Len(t, cilium.rules, 2, "Failed to delete orphaned rule")
 	for _, r := range cilium.rules {
 		assert.NotEqual(t, r.Description, "three", "Failed to delete orphaned rule")
 	}
 
+}
+
+func TestReoncileAddMissingOrphan(t *testing.T) {
+	cilium := &testPolicyRepository{
+		rules: make(api.Rules, 0),
+	}
+
+	policiesReaper, err := NewPoliciesReaper(nil, "", cilium)
+	require.NoError(t, err)
+
+	one := api.Rules{
+		api.NewRule().
+			WithDescription("one").
+			WithLabels(getIdentityLabels("one")).
+			WithEndpointSelector(api.EndpointSelectorNone),
+	}
+	oneValue, err := json.Marshal(one)
+	require.NoError(t, err)
+	cilium.add(one)
+
+	two := api.Rules{
+		api.NewRule().
+			WithDescription("two").
+			WithEndpointSelector(api.EndpointSelectorNone),
+	}
+	twoValue, err := json.Marshal(two)
+	require.NoError(t, err)
+
+	eventsChan := make(chan kvstore.KeyValueEvent, 3)
+
+	watcher := &kvstore.Watcher{
+		Events: eventsChan,
+	}
+
+	eventsChan <- kvstore.KeyValueEvent{
+		Typ:   kvstore.EventTypeCreate,
+		Key:   "one",
+		Value: oneValue,
+	}
+	eventsChan <- kvstore.KeyValueEvent{
+		Typ:   kvstore.EventTypeCreate,
+		Key:   "two",
+		Value: twoValue,
+	}
+	eventsChan <- kvstore.KeyValueEvent{
+		Typ: kvstore.EventTypeListDone,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
+	defer cancel()
+
+	require.Len(t, cilium.rules, 1, "Should only be one policy")
+
+	policiesReaper.reconcile(ctx, watcher)
+
+	assert.Len(t, cilium.rules, 2, "Failed to add new policy")
+
+	assert.Equal(t, "one", cilium.rules[0].Description, "Failed to retain existing policy")
+	assert.Equal(t, "two", cilium.rules[1].Description, "Failed to add new policy")
 }
